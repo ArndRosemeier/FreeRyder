@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 
-import { finalAnswer, sample, TASKS } from "../src/bench.js";
+import { sample } from "../src/bench.js";
+import { checkJson, checkStory, finalAnswer, storyTells, TASKS } from "../src/tasks.js";
 import { freeTextModels } from "../src/catalog.js";
 import { CallResult, type ChatClient, type Json, type Model } from "../src/client.js";
 import { type Config, FreeRyder } from "../src/picker.js";
@@ -11,15 +12,27 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createProxy } from "../src/proxy.js";
 
+const STORY =
+  "The coat cost four euros and smelled of somebody else's cigarettes. Marta bought it " +
+  "anyway, because November had arrived early and her own coat had a broken zip. " +
+  "On the tram home she put her hands in the pockets and found a key. It was brass, " +
+  "heavy, with a paper tag tied on by a bit of red string. The tag said 14B in pencil. " +
+  "She turned it over. Nothing on the back. At her stop she almost left it on the seat, " +
+  "then didn't. That evening she walked past the old flats on Kettengasse, where the " +
+  "buildings still had numbers painted above the doors, and counted up to fourteen. " +
+  "There was no B. There was a bakery, closed, and a woman smoking in the doorway who " +
+  "looked at the coat and then at Marta's face for a long time. You found it, the woman " +
+  "said. He always said someone would.";
+
 const GOOD_ANSWERS: Record<string, string> = {
-  arithmetic: "ANSWER: 410",
-  time: "ANSWER: 155",
-  letters: "ANSWER: 6",
-  logic: "ANSWER: yes",
-  reverse: "ANSWER: redyreerf",
-  code: "ANSWER: 20",
-  instruction: "banana",
-  json: '{"name": "Ada", "year": 1815}',
+  json:
+    '{"order_id": 4471, "customer": "Mirela Petrov", "date": "2025-03-03", ' +
+    '"items": [{"name": "lamp", "qty": 2, "unit_price": 24.50}, ' +
+    '{"name": "rug", "qty": 1, "unit_price": 89}], "total": 138}',
+  "riddle-easy": "Not red, not green.\nANSWER: blue",
+  "riddle-medium": "ANSWER: Dev, Ada, Cleo, Ben, Eli",
+  "riddle-hard": "<think>ANSWER: Quin, Sage</think>Case analysis...\nANSWER: **Pell, Tess**",
+  story: STORY,
 };
 
 const ok = (text: string, latency = 1, model = "m") =>
@@ -72,7 +85,22 @@ function ryder(behaviour: Record<string, Behaviour>, cfg: Partial<Config> = {}) 
 const hi = { messages: [{ role: "user", content: "hi" }] };
 
 test("good answers pass every task", () => {
-  for (const t of TASKS) assert.ok(t.check(GOOD_ANSWERS[t.name]), t.name);
+  for (const t of TASKS) {
+    assert.equal(t.check(GOOD_ANSWERS[t.name]), 1, t.name);
+    assert.equal(t.check("ANSWER: no idea"), 0, t.name);
+  }
+});
+
+test("JSON in a code fence gets half", () => {
+  assert.equal(checkJson("```json\n" + GOOD_ANSWERS.json + "\n```"), 0.5);
+  assert.equal(checkJson(GOOD_ANSWERS.json.replace("4471", '"4471"')), 0);
+});
+
+test("story tells are counted", () => {
+  const ai = STORY.replace("She turned it over.", "She turned it over\u2014a testament to a sense of wonder.");
+  assert.deepEqual(storyTells(ai), { dash: 1, testament: 1, "a sense of": 1 });
+  assert.ok(Math.abs(checkStory(ai) - 0.4) < 1e-9);
+  assert.equal(checkStory("Too short."), 0);
 });
 
 test("finalAnswer ignores think blocks", () => {

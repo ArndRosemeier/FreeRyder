@@ -8,10 +8,24 @@ from freeryder.client import CallResult
 from freeryder.picker import Config, FreeRyder
 from freeryder.proxy import make_handler
 
+STORY = ("The coat cost four euros and smelled of somebody else's cigarettes. Marta bought it "
+         "anyway, because November had arrived early and her own coat had a broken zip. "
+         "On the tram home she put her hands in the pockets and found a key. It was brass, "
+         "heavy, with a paper tag tied on by a bit of red string. The tag said 14B in pencil. "
+         "She turned it over. Nothing on the back. At her stop she almost left it on the seat, "
+         "then didn't. That evening she walked past the old flats on Kettengasse, where the "
+         "buildings still had numbers painted above the doors, and counted up to fourteen. "
+         "There was no B. There was a bakery, closed, and a woman smoking in the doorway who "
+         "looked at the coat and then at Marta's face for a long time. You found it, the woman "
+         "said. He always said someone would.")
 GOOD_ANSWERS = {
-    "arithmetic": "ANSWER: 410", "time": "ANSWER: 155", "letters": "ANSWER: 6",
-    "logic": "ANSWER: yes", "reverse": "ANSWER: redyreerf", "code": "ANSWER: 20",
-    "instruction": "banana", "json": '{"name": "Ada", "year": 1815}',
+    "json": '{"order_id": 4471, "customer": "Mirela Petrov", "date": "2025-03-03", '
+            '"items": [{"name": "lamp", "qty": 2, "unit_price": 24.50}, '
+            '{"name": "rug", "qty": 1, "unit_price": 89}], "total": 138}',
+    "riddle-easy": "Not red, not green.\nANSWER: blue",
+    "riddle-medium": "ANSWER: Dev, Ada, Cleo, Ben, Eli",
+    "riddle-hard": "<think>ANSWER: Quin, Sage</think>Case analysis...\nANSWER: **Pell, Tess**",
+    "story": STORY,
 }
 
 
@@ -63,7 +77,22 @@ def ryder(behaviour, **cfg):
 
 def test_good_answers_pass_every_task():
     for t in TASKS:
-        assert t.check(GOOD_ANSWERS[t.name]), t.name
+        assert t.check(GOOD_ANSWERS[t.name]) == 1.0, t.name
+        assert t.check("ANSWER: no idea") == 0.0, t.name
+
+
+def test_json_in_code_fence_gets_half():
+    from freeryder.tasks import check_json
+    assert check_json("```json\n" + GOOD_ANSWERS["json"] + "\n```") == 0.5
+    assert check_json(GOOD_ANSWERS["json"].replace("4471", '"4471"')) == 0.0
+
+
+def test_story_tells_are_counted():
+    from freeryder.tasks import check_story, story_tells
+    ai = STORY.replace("She turned it over.", "She turned it over—a testament to a sense of wonder.")
+    assert story_tells(ai) == {"dash": 1, "testament": 1, "a sense of": 1}
+    assert abs(check_story(ai) - 0.4) < 1e-9
+    assert check_story("Too short.") == 0.0
 
 
 def test_final_answer_ignores_think_blocks():

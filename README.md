@@ -74,8 +74,15 @@ client.chat.completions.create(model="freeryder", messages=[{"role": "user", "co
 2. **Probe**: one tiny call per model drops the ones this account can't use at all
    (removed, agent-only, or blocked by your OpenRouter privacy settings).
 3. **Benchmark** up to 10 random reachable models (previous top 3 always included)
-   on 8 short tasks with checkable answers: arithmetic, time, letter counting, logic,
-   string reversal, code tracing, exact instruction following, and strict JSON.
+   on 5 tasks, each scored 0 to 1:
+   - **Strict JSON**: extract an order into an exact schema. Full marks only for raw JSON,
+     half if it comes wrapped in a code fence.
+   - **Three logic riddles** (easy, medium, hard). They are original, so a model can't
+     have memorised them, and each answer was checked by brute force.
+   - **A short story "written like a human"**, scored by counting AI-writing tells: em
+     dashes, stock words and phrases ("tapestry", "testament", "a sense of", "Elara"...)
+     and a markdown title. Each tell costs 0.2.
+
    Score = 0.6 × quality + 0.25 × reliability + 0.15 × speed. Models below 0.5 are
    never used.
 4. **Ride** the top model. A model is put on a 10-minute cooldown after a 429, two
