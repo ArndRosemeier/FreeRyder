@@ -31,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
                         format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
     client = OpenRouterClient()
     if not client.api_key and args.cmd != "list":
-        print("Set OPENROUTER_API_KEY (or OPEN_ROUTER_KEY).", file=sys.stderr)
+        print("Set OPEN_ROUTER_KEY_JUST_FOR_FREE_MODELS (or OPENROUTER_API_KEY).", file=sys.stderr)
         return 2
 
     if args.cmd == "list":

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 BASE_URL = "https://openrouter.ai/api/v1"
-KEY_VARS = ("OPENROUTER_API_KEY", "OPEN_ROUTER_KEY")
+KEY_VARS = ("OPEN_ROUTER_KEY_JUST_FOR_FREE_MODELS", "OPENROUTER_API_KEY", "OPEN_ROUTER_KEY")
 
 
 def api_key_from_env() -> str | None:

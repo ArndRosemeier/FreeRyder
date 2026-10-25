@@ -14,8 +14,12 @@ Pure Python 3.10+, no dependencies.
 
 ```bash
 pip install -e .
-export OPENROUTER_API_KEY=...   # OPEN_ROUTER_KEY also works
+export OPEN_ROUTER_KEY_JUST_FOR_FREE_MODELS=...
 ```
+
+The key is taken from the first of `OPEN_ROUTER_KEY_JUST_FOR_FREE_MODELS`,
+`OPENROUTER_API_KEY` and `OPEN_ROUTER_KEY` that is set. Use a separate key with a small
+credit limit: FreeRyder only calls free models, so it should never spend anything.
 
 ## Use
 
