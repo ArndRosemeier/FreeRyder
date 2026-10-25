@@ -49,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
             print(r.summary())
         print(f"\nusing: {ryder.current or 'none (no model passed min score)'}")
     elif args.cmd == "ask":
+        ryder.start().wait_ready()  # one-shot: worth waiting for a benchmarked model
         res = ryder.chat({"messages": [{"role": "user", "content": args.prompt}]})
         if not res.ok:
             print(f"failed: {res.status} {res.error}", file=sys.stderr)
@@ -57,8 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         print(res.text)
     elif args.cmd == "serve":
         from .proxy import serve
-        if ryder.current is None:
-            ryder.scan()
+        ryder.start()  # discovery runs in the background; requests use the fallback meanwhile
         serve(ryder, args.host, args.port)
     return 0
 

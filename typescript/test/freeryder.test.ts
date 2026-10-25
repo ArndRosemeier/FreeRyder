@@ -6,6 +6,9 @@ import { finalAnswer, sample, TASKS } from "../src/bench.js";
 import { freeTextModels } from "../src/catalog.js";
 import { CallResult, type ChatClient, type Json, type Model } from "../src/client.js";
 import { type Config, FreeRyder } from "../src/picker.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createProxy } from "../src/proxy.js";
 
 const GOOD_ANSWERS: Record<string, string> = {
@@ -154,7 +157,8 @@ test("falls back to the router when nothing works", async () => {
   client.behaviour.a = "busy";
   const res = await r.chat(hi);
   assert.ok(res.ok);
-  assert.equal(client.calls.at(-1), "openrouter/free");
+  assert.equal(res.body.model, "openrouter/free");
+  await r.waitReady();
 });
 
 test("proxy round trip, stream and status", async () => {
@@ -180,4 +184,58 @@ test("proxy round trip, stream and status", async () => {
   } finally {
     server.close();
   }
+});
+
+test("start returns immediately and uses the fallback while warming up", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((res) => (release = res));
+  const { client, r } = ryder(
+    {
+      best: "good",
+      "openrouter/free": "good",
+    },
+    { fallbackModel: "openrouter/free" },
+  );
+  client.catalog = client.catalog.slice(0, 1);
+  // Slow the benchmark down until we release it.
+  const chat = client.chat.bind(client);
+  client.chat = async (payload: Json) => {
+    if (payload.model === "best" && payload.messages.at(-1).content !== "Say OK.") await gate;
+    return chat(payload);
+  };
+  assert.equal(r.start(), r);
+  assert.ok(r.scanning);
+  const early = await r.chat(hi);
+  assert.equal(early.body.model, "openrouter/free");
+  release();
+  assert.ok(await r.waitReady());
+  assert.equal(r.current, "best");
+  assert.equal((await r.chat(hi)).body.model, "best");
+});
+
+test("chat without a fallback waits for warm-up", async () => {
+  const { r } = ryder({ a: "good" });
+  const res = await r.start().chat(hi);
+  assert.equal(res.body.model, "a");
+});
+
+test("start skips the scan when the cache is fresh", async () => {
+  const stateFile = join(mkdtempSync(join(tmpdir(), "freeryder-")), "state.json");
+  const client = new FakeClient({ a: "good" });
+  await new FreeRyder({ client, config: { stateFile } }).scan();
+  const n = client.calls.length;
+  const r = new FreeRyder({ client, config: { stateFile } }).start();
+  assert.ok(!r.scanning);
+  assert.equal(r.current, "a");
+  assert.equal(client.calls.length, n);
+});
+
+test("a background scan error is kept, not thrown", async () => {
+  const client = new FakeClient({});
+  client.listModels = async () => {
+    throw new Error("network down");
+  };
+  const r = new FreeRyder({ client, config: { stateFile: null, fallbackModel: null } });
+  await r.start().waitReady();
+  assert.match(String(r.lastError), /network down/);
 });

@@ -186,10 +186,59 @@ def test_fallback_router_when_nothing_works():
     r.scan()
     client.behaviour["a"] = "busy"
     res = r.chat({"messages": [{"role": "user", "content": "hi"}]})
-    assert res.ok and client.calls[-1] == "openrouter/free"
+    assert res.ok and res.body["model"] == "openrouter/free"
+    r.wait_ready()
 
 
 def test_key_is_required():
     import pytest
     with pytest.raises(ValueError):
         FreeRyder(config=Config(state_file=None))
+
+
+def test_start_returns_immediately_and_uses_fallback_while_warming_up():
+    import time
+    gate = threading.Event()
+
+    def slow_good(n):
+        gate.wait(5)
+        return FakeClient({"x": "good"}).chat(
+            {"model": "x", "messages": [{"role": "user", "content": TASKS[(n - 1) % len(TASKS)].prompt}]})
+
+    client, r = ryder({"best": slow_good, "openrouter/free": "good"},
+                      fallback_model="openrouter/free")
+    client.catalog = client.catalog[:1]
+    t0 = time.monotonic()
+    assert r.start() is r
+    assert time.monotonic() - t0 < 0.5 and r.scanning
+    res = r.chat({"messages": [{"role": "user", "content": "hi"}]})
+    assert res.ok and res.body["model"] == "openrouter/free"
+    gate.set()
+    assert r.wait_ready(5) and r.current == "best"
+    res = r.chat({"messages": [{"role": "user", "content": "hi"}]})
+    assert res.ok and r.current == "best"
+
+
+def test_chat_without_fallback_waits_for_warm_up():
+    client, r = ryder({"a": "good"})
+    res = r.start().chat({"messages": [{"role": "user", "content": "hi"}]})
+    assert res.ok and res.body["model"] == "a"
+
+
+def test_start_skips_scan_when_cache_is_fresh(tmp_path):
+    client = FakeClient({"a": "good"})
+    state = tmp_path / "state.json"
+    FreeRyder(config=Config(state_file=state), client=client).scan()
+    n = len(client.calls)
+    r = FreeRyder(config=Config(state_file=state), client=client).start()
+    assert not r.scanning and r.current == "a" and len(client.calls) == n
+
+
+def test_background_scan_error_is_kept_not_raised():
+    class Broken(FakeClient):
+        def list_models(self):
+            raise OSError("network down")
+
+    r = FreeRyder(config=Config(state_file=None, fallback_model=None), client=Broken({}))
+    r.start().wait_ready()
+    assert isinstance(r.last_error, OSError)

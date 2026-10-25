@@ -76,7 +76,9 @@ export class FreeRyder {
   ranking: Candidate[] = [];
   scannedAt = 0;
   lastReports: ModelReport[] = [];
-  private scanning: Promise<ModelReport[]> | null = null;
+  lastError: unknown = null;
+  private scanPromise: Promise<ModelReport[]> | null = null;
+  private lastScanStart = 0;
 
   constructor(opts: FreeRyderOptions) {
     if (!opts.client && !opts.apiKey) throw new Error("FreeRyder needs an OpenRouter apiKey");
@@ -86,13 +88,58 @@ export class FreeRyder {
     this.loadState();
   }
 
+  // ---- warm-up -------------------------------------------------------------------------
+
+  /**
+   * Warm up: start discovery in the background and return immediately.
+   * Skipped if a fresh ranking is already cached. `chat` can be called right away: until the
+   * first scan finishes, requests go to cached models or the fallback router.
+   */
+  start(): this {
+    this.kickScan();
+    return this;
+  }
+
+  /** Wait until a running background scan has finished. True if a model is ready. */
+  async waitReady(): Promise<boolean> {
+    if (this.scanPromise) await this.scanPromise.catch(() => {});
+    return this.current !== null;
+  }
+
+  get scanning(): boolean {
+    return this.scanPromise !== null;
+  }
+
+  /** Start a background scan if needed (nothing usable, stale, or forced). */
+  private kickScan(force = false): void {
+    if (this.scanPromise) return;
+    const t = now();
+    const stale = t - this.scannedAt > this.cfg.rescanAfter;
+    const usable = this.ranking.some((c) => t >= c.cooldownUntil);
+    if (!(force || stale || !usable)) return;
+    if (t - this.lastScanStart < this.cfg.minRescanGap) return;
+    this.scan().then(
+      () => (this.lastError = null),
+      (e) => {
+        this.lastError = e;
+        this.cfg.log(`background scan failed: ${String(e)}`);
+      },
+    );
+  }
+
   // ---- scanning ------------------------------------------------------------------------
 
-  /** List free models, benchmark a random sample, and rebuild the ranking. */
+  /**
+   * List free models, benchmark a random sample, and rebuild the ranking.
+   * Most callers want `start()` instead, which does this in the background.
+   */
   scan(): Promise<ModelReport[]> {
     // Concurrent callers share one scan.
-    this.scanning ??= this.doScan().finally(() => (this.scanning = null));
-    return this.scanning;
+    if (!this.scanPromise) {
+      this.lastScanStart = now();
+      this.scanPromise = this.doScan().finally(() => (this.scanPromise = null));
+    }
+    return this.scanPromise;
   }
 
   private async doScan(): Promise<ModelReport[]> {
@@ -110,15 +157,6 @@ export class FreeRyder {
     this.saveState();
     for (const r of reports) this.cfg.log(r.summary());
     return reports;
-  }
-
-  private async maybeRescan(force = false): Promise<void> {
-    const t = now();
-    const stale = t - this.scannedAt > this.cfg.rescanAfter;
-    const usable = this.ranking.some((c) => t >= c.cooldownUntil);
-    if ((force || stale || !usable) && (this.scanning || t - this.scannedAt >= this.cfg.minRescanGap)) {
-      await this.scan();
-    }
   }
 
   /** The model the next request goes to, or null if none is healthy. */
@@ -160,8 +198,7 @@ export class FreeRyder {
     cand.recent = [];
   }
 
-  private async candidates(tried: Set<string>): Promise<Candidate[]> {
-    await this.maybeRescan();
+  private available(tried: Set<string>): Candidate[] {
     const t = now();
     return this.ranking.filter((c) => t >= c.cooldownUntil && !tried.has(c.model));
   }
@@ -169,25 +206,30 @@ export class FreeRyder {
   // ---- public API ----------------------------------------------------------------------
 
   /**
-   * Send an OpenAI-style chat payload to the best healthy free model.
-   * `payload.model` is replaced. Fails over to the next-ranked model on errors, rescans when
-   * no ranked model is usable, and finally tries `fallbackModel`.
-   * Resolves with the last failure if everything fails.
+   * Send an OpenAI-style chat payload to the best healthy free model. `payload.model` is
+   * replaced. Never waits for a scan when it can avoid it: it fails over to the next-ranked
+   * model, starts a background rescan when the ranking runs dry or gets stale, and meanwhile
+   * uses `fallbackModel`. Only without a fallback does it wait for a running scan.
+   * Resolves with the last failure if every attempt fails.
    */
   async chat(payload: Json): Promise<CallResult> {
+    this.kickScan();
     let last: CallResult | null = null;
     const tried = new Set<string>();
-    let rescanned = false;
-    for (let i = 0; i < this.cfg.maxAttempts; i++) {
-      let cands = await this.candidates(tried);
-      if (!cands.length && !rescanned) {
-        await this.maybeRescan(true);
-        rescanned = true;
-        cands = await this.candidates(tried);
+    let waited = false;
+    let attempts = 0;
+    while (attempts < this.cfg.maxAttempts) {
+      const cands = this.available(tried);
+      if (!cands.length) {
+        this.kickScan();
+        if (this.cfg.fallbackModel || waited || !this.scanning) break;
+        await this.waitReady(); // no fallback: the scan is our only hope
+        waited = true;
+        continue;
       }
-      if (!cands.length) break;
       const cand = cands[0];
       tried.add(cand.model);
+      attempts++;
       const res = await this.client.chat({ ...payload, model: cand.model }, this.cfg.timeout);
       this.record(cand, res);
       if (res.ok) return res;
@@ -197,7 +239,7 @@ export class FreeRyder {
     }
     const fb = this.cfg.fallbackModel;
     if (fb && !tried.has(fb)) {
-      this.cfg.log(`no benchmarked model worked; falling back to ${fb}`);
+      this.cfg.log(`no benchmarked model available; using ${fb}`);
       const res = await this.client.chat({ ...payload, model: fb }, this.cfg.timeout);
       if (res.ok || last === null) return res;
     }

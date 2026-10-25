@@ -30,8 +30,9 @@ freeryder --api-key "$KEY" serve --port 8765     # local OpenAI-compatible proxy
 
 ```python
 from freeryder import FreeRyder
-ryder = FreeRyder(api_key)
+ryder = FreeRyder(api_key).start()   # returns at once; discovery runs in a background thread
 print(ryder.complete("Summarise the plot of Hamlet in one line."))
+res = ryder.chat({"messages": [...]})  # OpenAI-style payload, returns a CallResult
 ```
 
 ## TypeScript
@@ -43,9 +44,15 @@ npx freeryder --api-key "$KEY" scan              # same commands as above
 
 ```ts
 import { FreeRyder } from "freeryder";
-const ryder = new FreeRyder({ apiKey });
+const ryder = new FreeRyder({ apiKey }).start(); // returns at once; discovery runs in the background
 console.log(await ryder.complete("Summarise the plot of Hamlet in one line."));
 ```
+
+`start()` is the only setup call. Inference works right away: until the first discovery
+finishes, requests go to the cached ranking from the last run or to `openrouter/free`.
+Later rescans also run in the background, so inference never waits on discovery (unless
+you set the fallback to none). `wait_ready()` / `waitReady()` blocks until discovery is
+done if you prefer to wait.
 
 ## Proxy
 
@@ -75,7 +82,8 @@ client.chat.completions.create(model="freeryder", messages=[{"role": "user", "co
    failures in a row, or when its recent latency is over 3× its benchmark latency
    (and over 20 s). A model that returns 404/410 is dropped. Each request tries up to
    4 models before falling back to `openrouter/free`.
-5. **Rescan** when no ranked model is usable, or every 6 hours to pick up new models.
+5. **Rescan** in the background when no ranked model is usable, or every 6 hours to pick
+   up new models; `openrouter/free` covers requests until it finishes.
    The ranking is cached in `~/.cache/freeryder/state.json`.
 
 All thresholds are in `Config` (Python) / `config` (TypeScript).

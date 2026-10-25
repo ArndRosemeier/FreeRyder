@@ -71,14 +71,68 @@ class FreeRyder:
         self.ranking: list[Candidate] = []
         self.scanned_at = 0.0
         self.last_reports: list[ModelReport] = []
+        self.last_error: Exception | None = None
         self._lock = threading.RLock()
         self._scan_lock = threading.Lock()
+        self._scan_thread: threading.Thread | None = None
+        self._last_scan_start = 0.0
         self._load_state()
+
+    # ---- warm-up --------------------------------------------------------------------------
+
+    def start(self) -> "FreeRyder":
+        """Warm up: start discovery in a background thread and return immediately.
+
+        Skipped if a fresh ranking is already cached. You can call `chat` right away: until
+        the first scan finishes, requests go to cached models or the fallback router.
+        """
+        self._kick_scan()
+        return self
+
+    def wait_ready(self, timeout: float | None = None) -> bool:
+        """Block until a running background scan has finished. True if a model is ready."""
+        t = self._scan_thread
+        if t is not None:
+            t.join(timeout)
+        return self.current is not None
+
+    @property
+    def scanning(self) -> bool:
+        t = self._scan_thread
+        return t is not None and t.is_alive()
+
+    def _kick_scan(self, force: bool = False) -> None:
+        """Start a background scan if needed (nothing usable, stale, or forced)."""
+        with self._lock:
+            if self.scanning:
+                return
+            now = time.time()
+            stale = now - self.scanned_at > self.cfg.rescan_after
+            usable = any(c.available(now) for c in self.ranking)
+            if not (force or stale or not usable):
+                return
+            if now - self._last_scan_start < self.cfg.min_rescan_gap:
+                return
+            self._last_scan_start = now
+            self._scan_thread = threading.Thread(target=self._scan_safely, name="freeryder-scan",
+                                                 daemon=True)
+            self._scan_thread.start()
+
+    def _scan_safely(self) -> None:
+        try:
+            self.scan()
+            self.last_error = None
+        except Exception as e:  # network down, bad key...: keep serving what we have
+            self.last_error = e
+            log.warning("background scan failed: %r", e)
 
     # ---- scanning -------------------------------------------------------------------------
 
     def scan(self) -> list[ModelReport]:
-        """List free models, benchmark a random sample, and rebuild the ranking."""
+        """List free models, benchmark a random sample, and rebuild the ranking (blocking).
+
+        Most callers want `start()` instead, which does this in the background.
+        """
         with self._scan_lock:
             free = [m["id"] for m in free_text_models(self.client.list_models())]
             reachable = self.bench.probe(free, parallel=self.cfg.parallel)
@@ -97,13 +151,6 @@ class FreeRyder:
             for r in reports:
                 log.info("%s", r.summary())
             return reports
-
-    def _maybe_rescan(self, force: bool = False) -> None:
-        now = time.time()
-        stale = now - self.scanned_at > self.cfg.rescan_after
-        usable = any(c.available(now) for c in self.ranking)
-        if (force or stale or not usable) and now - self.scanned_at >= self.cfg.min_rescan_gap:
-            self.scan()
 
     @property
     def current(self) -> str | None:
@@ -138,34 +185,38 @@ class FreeRyder:
         cand.failures = 0
         cand.recent.clear()
 
-    def _candidates(self) -> list[Candidate]:
+    def _available(self, tried: set[str]) -> list[Candidate]:
+        now = time.time()
         with self._lock:
-            self._maybe_rescan()
-            now = time.time()
-            return [c for c in self.ranking if c.available(now)]
+            return [c for c in self.ranking if c.available(now) and c.model not in tried]
 
     # ---- public API -----------------------------------------------------------------------
 
     def chat(self, payload: dict[str, Any]) -> CallResult:
         """Send an OpenAI-style chat payload to the best healthy free model.
 
-        `payload["model"]` is replaced. Fails over to the next-ranked model on errors and
-        rescans when no ranked model is usable. Returns the last failure if all attempts fail.
+        `payload["model"]` is replaced. Never waits for a scan when it can avoid it: it fails
+        over to the next-ranked model, starts a background rescan when the ranking runs dry
+        or gets stale, and meanwhile uses `fallback_model`. Only without a fallback does it
+        wait for a running scan. Returns the last failure if every attempt fails.
         """
+        self._kick_scan()
         last: CallResult | None = None
         tried: set[str] = set()
-        rescanned = False
-        for _ in range(self.cfg.max_attempts):
-            cands = [c for c in self._candidates() if c.model not in tried]
-            if not cands and not rescanned:
-                with self._lock:
-                    self._maybe_rescan(force=True)
-                rescanned = True
-                cands = [c for c in self._candidates() if c.model not in tried]
+        waited = False
+        attempts = 0
+        while attempts < self.cfg.max_attempts:
+            cands = self._available(tried)
             if not cands:
-                break
+                self._kick_scan()
+                if self.cfg.fallback_model or waited or not self.scanning:
+                    break
+                self.wait_ready()  # no fallback: the scan is our only hope
+                waited = True
+                continue
             cand = cands[0]
             tried.add(cand.model)
+            attempts += 1
             res = self.client.chat({**payload, "model": cand.model}, timeout=self.cfg.timeout)
             self._record(cand, res)
             if res.ok:
@@ -176,7 +227,7 @@ class FreeRyder:
                 return res
         fb = self.cfg.fallback_model
         if fb and fb not in tried:
-            log.info("no benchmarked model worked; falling back to %s", fb)
+            log.info("no benchmarked model available; using %s", fb)
             res = self.client.chat({**payload, "model": fb}, timeout=self.cfg.timeout)
             if res.ok or last is None:
                 return res

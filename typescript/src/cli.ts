@@ -65,6 +65,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     for (const r of reports) console.log(r.summary());
     console.log(`\nusing: ${ryder.current ?? "none (no model passed min score)"}`);
   } else if (cmd === "ask") {
+    await ryder.start().waitReady(); // one-shot: worth waiting for a benchmarked model
     const res = await ryder.chat({ messages: [{ role: "user", content: rest.join(" ") }] });
     if (!res.ok) {
       console.error(`failed: ${res.status} ${res.error}`);
@@ -73,7 +74,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     console.error(`[${res.body.model}]`);
     console.log(res.text);
   } else if (cmd === "serve") {
-    if (ryder.current === null) await ryder.scan();
+    ryder.start(); // discovery runs in the background; requests use the fallback meanwhile
     serve(ryder, values.host, Number(values.port));
     return -1; // keep running
   }
