@@ -1,0 +1,273 @@
+import json
+import threading
+import urllib.request
+
+from freeryder.bench import TASKS, Benchmark, final_answer, sample
+from freeryder.catalog import free_text_models
+from freeryder.client import CallResult
+from freeryder.picker import Config, FreeRyder
+from freeryder.proxy import make_handler
+
+STORY = ("The coat cost four euros and smelled of somebody else's cigarettes. Marta bought it "
+         "anyway, because November had arrived early and her own coat had a broken zip. "
+         "On the tram home she put her hands in the pockets and found a key. It was brass, "
+         "heavy, with a paper tag tied on by a bit of red string. The tag said 14B in pencil. "
+         "She turned it over. Nothing on the back. At her stop she almost left it on the seat, "
+         "then didn't. That evening she walked past the old flats on Kettengasse, where the "
+         "buildings still had numbers painted above the doors, and counted up to fourteen. "
+         "There was no B. There was a bakery, closed, and a woman smoking in the doorway who "
+         "looked at the coat and then at Marta's face for a long time. You found it, the woman "
+         "said. He always said someone would.")
+GOOD_ANSWERS = {
+    "json": '{"order_id": 4471, "customer": "Mirela Petrov", "date": "2025-03-03", '
+            '"items": [{"name": "lamp", "qty": 2, "unit_price": 24.50}, '
+            '{"name": "rug", "qty": 1, "unit_price": 89}], "total": 138}',
+    "riddle-easy": "Not red, not green.\nANSWER: blue",
+    "riddle-medium": "ANSWER: Dev, Ada, Cleo, Ben, Eli",
+    "riddle-hard": "<think>ANSWER: Quin, Sage</think>Case analysis...\nANSWER: **Pell, Tess**",
+    "story": STORY,
+}
+
+
+def ok(text, latency=1.0, model="m"):
+    return CallResult(True, 200, latency, {"model": model, "choices": [
+        {"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}]})
+
+
+class FakeClient:
+    """behaviour[model] = 'good' | 'dumb' | 'busy' | 'gone' | callable(n)->CallResult"""
+
+    def __init__(self, behaviour, catalog=None):
+        self.behaviour = behaviour
+        self.catalog = catalog or [
+            {"id": m, "pricing": {"prompt": "0", "completion": "0"},
+             "architecture": {"output_modalities": ["text"]}} for m in behaviour]
+        self.calls = []
+        self.lock = threading.Lock()
+
+    def list_models(self):
+        return self.catalog
+
+    def chat(self, payload, timeout=60):
+        model = payload["model"]
+        if payload["messages"][-1]["content"] == "Say OK.":  # reachability probe
+            return CallResult(False, 404, 0.1) if self.behaviour[model] == "gone" else ok("OK")
+        with self.lock:
+            self.calls.append(model)
+            n = self.calls.count(model)
+        b = self.behaviour[model]
+        if callable(b):
+            return b(n)
+        if b == "busy":
+            return CallResult(False, 429, 0.1, error="rate limited")
+        if b == "gone":
+            return CallResult(False, 404, 0.1, error="no endpoints")
+        prompt = payload["messages"][-1]["content"]
+        task = next((t for t in TASKS if t.prompt == prompt), None)
+        if b == "good":
+            return ok(GOOD_ANSWERS[task.name] if task else "hello", model=model)
+        return ok("ANSWER: no idea", latency=0.5, model=model)
+
+
+def ryder(behaviour, **cfg):
+    cfg.setdefault("fallback_model", None)
+    client = FakeClient(behaviour)
+    return client, FreeRyder(config=Config(state_file=None, min_rescan_gap=0, **cfg), client=client)
+
+
+def test_good_answers_pass_every_task():
+    for t in TASKS:
+        assert t.check(GOOD_ANSWERS[t.name]) == 1.0, t.name
+        assert t.check("ANSWER: no idea") == 0.0, t.name
+
+
+def test_json_in_code_fence_gets_half():
+    from freeryder.tasks import check_json
+    assert check_json("```json\n" + GOOD_ANSWERS["json"] + "\n```") == 0.5
+    assert check_json(GOOD_ANSWERS["json"].replace("4471", '"4471"')) == 0.0
+
+
+def test_story_tells_are_counted():
+    from freeryder.tasks import check_story, story_tells
+    ai = STORY.replace("She turned it over.", "She turned it over—a testament to a sense of wonder.")
+    assert story_tells(ai) == {"dash": 1, "testament": 1, "a sense of": 1}
+    assert abs(check_story(ai) - 0.4) < 1e-9
+    assert check_story("Too short.") == 0.0
+
+
+def test_final_answer_ignores_think_blocks():
+    assert final_answer("<think>ANSWER: 1</think>so... ANSWER: **42**.") == "42"
+
+
+def test_catalog_filters_non_text_and_routers():
+    models = [
+        {"id": "a/x:free", "pricing": {"prompt": "0", "completion": "0"},
+         "architecture": {"output_modalities": ["text"]}},
+        {"id": "openrouter/free", "pricing": {"prompt": "0", "completion": "0"},
+         "architecture": {"output_modalities": ["text"]}},
+        {"id": "g/music", "pricing": {"prompt": "0", "completion": "0"},
+         "architecture": {"output_modalities": ["text", "audio"]}},
+        {"id": "n/content-safety:free", "pricing": {"prompt": "0", "completion": "0"},
+         "architecture": {"output_modalities": ["text"]}},
+        {"id": "paid/model", "pricing": {"prompt": "0.000001", "completion": "0.000002"},
+         "architecture": {"output_modalities": ["text"]}},
+    ]
+    assert [m["id"] for m in free_text_models(models)] == ["a/x:free"]
+
+
+def test_sample_caps_and_keeps_preferred():
+    models = [f"m{i}" for i in range(30)]
+    s = sample(models, 10, prefer=["m7", "gone"])
+    assert len(s) == 10 and s[0] == "m7" and len(set(s)) == 10
+
+
+def test_scan_ranks_good_over_dumb_and_busy():
+    _, r = ryder({"good": "good", "dumb": "dumb", "busy": "busy"})
+    reports = r.scan()
+    assert reports[0].model == "good"
+    assert [c.model for c in r.ranking] == ["good"]  # others below min_score
+    assert r.current == "good"
+
+
+def test_failover_when_best_congests_then_rescan():
+    state = {"congested": False}
+
+    def flaky(n):
+        if state["congested"]:
+            return CallResult(False, 429, 0.1, error="busy")
+        return FakeClient({"x": "good"}).chat(
+            {"model": "x", "messages": [{"role": "user", "content": TASKS[n - 1].prompt}]})
+
+    def second(n):
+        r = FakeClient({"y": "good"}).chat(
+            {"model": "y", "messages": [{"role": "user",
+                                         "content": TASKS[(n - 1) % len(TASKS)].prompt}]})
+        r.latency = 5.0
+        return r
+
+    client, r = ryder({"best": flaky, "second": second})
+    r.scan()
+    assert r.current == "best"
+    state["congested"] = True
+    res = r.chat({"messages": [{"role": "user", "content": "hi"}]})
+    assert res.ok and r.current == "second"
+
+
+def test_gone_model_is_dropped():
+
+    def vanishing(n):
+        if n > len(TASKS):
+            return CallResult(False, 404, 0.1, error="gone")
+        return ok(GOOD_ANSWERS[TASKS[n - 1].name], latency=0.5)
+
+    client, r = ryder({"a": vanishing, "b": "good"})
+    r.scan()
+    assert r.current == "a"
+    assert r.chat({"messages": [{"role": "user", "content": "hi"}]}).ok
+    assert [c.model for c in r.ranking] == ["b"]
+
+
+def test_rescan_when_everything_is_cooling():
+    client, r = ryder({"a": "good"})
+    r.scan()
+    for c in r.ranking:
+        c.cooldown_until = 1e18
+    client.behaviour["a"] = "good"
+    assert r.chat({"messages": [{"role": "user", "content": "hi"}]}).ok
+
+
+def test_proxy_round_trip_and_stream():
+    from http.server import ThreadingHTTPServer
+    _, r = ryder({"good": "good"})
+    r.scan()
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(r))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_port}/v1"
+    try:
+        body = json.dumps({"model": "freeryder",
+                           "messages": [{"role": "user", "content": "hi"}]}).encode()
+        req = urllib.request.Request(base + "/chat/completions", data=body,
+                                     headers={"Content-Type": "application/json"})
+        out = json.loads(urllib.request.urlopen(req).read())
+        assert out["choices"][0]["message"]["content"] == "hello"
+        body = json.dumps({"messages": [{"role": "user", "content": "hi"}],
+                           "stream": True}).encode()
+        req = urllib.request.Request(base + "/chat/completions", data=body,
+                                     headers={"Content-Type": "application/json"})
+        sse = urllib.request.urlopen(req).read().decode()
+        assert '"content": "hello"' in sse and sse.rstrip().endswith("data: [DONE]")
+        status = json.loads(urllib.request.urlopen(base + "/status").read())
+        assert status["current"] == "good"
+    finally:
+        srv.shutdown()
+
+
+def test_probe_skips_unusable_models():
+    client, r = ryder({"dead": "gone", "good": "good"})
+    reports = r.scan()
+    assert [x.model for x in reports] == ["good"]
+
+
+def test_fallback_router_when_nothing_works():
+    client, r = ryder({"a": "good", "openrouter/free": "good"},
+                      fallback_model="openrouter/free")
+    client.catalog = client.catalog[:1]
+    r.scan()
+    client.behaviour["a"] = "busy"
+    res = r.chat({"messages": [{"role": "user", "content": "hi"}]})
+    assert res.ok and res.body["model"] == "openrouter/free"
+    r.wait_ready()
+
+
+def test_key_is_required():
+    import pytest
+    with pytest.raises(ValueError):
+        FreeRyder(config=Config(state_file=None))
+
+
+def test_start_returns_immediately_and_uses_fallback_while_warming_up():
+    import time
+    gate = threading.Event()
+
+    def slow_good(n):
+        gate.wait(5)
+        return FakeClient({"x": "good"}).chat(
+            {"model": "x", "messages": [{"role": "user", "content": TASKS[(n - 1) % len(TASKS)].prompt}]})
+
+    client, r = ryder({"best": slow_good, "openrouter/free": "good"},
+                      fallback_model="openrouter/free")
+    client.catalog = client.catalog[:1]
+    t0 = time.monotonic()
+    assert r.start() is r
+    assert time.monotonic() - t0 < 0.5 and r.scanning
+    res = r.chat({"messages": [{"role": "user", "content": "hi"}]})
+    assert res.ok and res.body["model"] == "openrouter/free"
+    gate.set()
+    assert r.wait_ready(5) and r.current == "best"
+    res = r.chat({"messages": [{"role": "user", "content": "hi"}]})
+    assert res.ok and r.current == "best"
+
+
+def test_chat_without_fallback_waits_for_warm_up():
+    client, r = ryder({"a": "good"})
+    res = r.start().chat({"messages": [{"role": "user", "content": "hi"}]})
+    assert res.ok and res.body["model"] == "a"
+
+
+def test_start_skips_scan_when_cache_is_fresh(tmp_path):
+    client = FakeClient({"a": "good"})
+    state = tmp_path / "state.json"
+    FreeRyder(config=Config(state_file=state), client=client).scan()
+    n = len(client.calls)
+    r = FreeRyder(config=Config(state_file=state), client=client).start()
+    assert not r.scanning and r.current == "a" and len(client.calls) == n
+
+
+def test_background_scan_error_is_kept_not_raised():
+    class Broken(FakeClient):
+        def list_models(self):
+            raise OSError("network down")
+
+    r = FreeRyder(config=Config(state_file=None, fallback_model=None), client=Broken({}))
+    r.start().wait_ready()
+    assert isinstance(r.last_error, OSError)

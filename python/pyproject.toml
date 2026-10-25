@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "freeryder"
+version = "0.1.0"
+description = "Benchmark OpenRouter's free models and ride the best one, with automatic failover."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+freeryder = "freeryder.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
