@@ -8,29 +8,48 @@ responsiveness and capability, uses the best one until it congests or disappears
 fails over to the next one, and rescans when it runs out. If nothing benchmarked is
 healthy, it falls back to OpenRouter's own `openrouter/free` router.
 
-Pure Python 3.10+, no dependencies.
+Two implementations with the same behaviour and a shared ranking cache:
 
-## Setup
+- [`python/`](python): Python 3.10+, no dependencies.
+- [`typescript/`](typescript): Node 18+, no runtime dependencies.
 
-```bash
-pip install -e .
-export OPEN_ROUTER_KEY_JUST_FOR_FREE_MODELS=...
-```
+Each is a library, a CLI and a local OpenAI-compatible proxy. The OpenRouter API key is
+always passed in explicitly; FreeRyder never reads it from the environment. Using a
+separate key with a small credit limit is a good idea: FreeRyder only calls free models,
+so it should never spend anything.
 
-The key is taken from the first of `OPEN_ROUTER_KEY_JUST_FOR_FREE_MODELS`,
-`OPENROUTER_API_KEY` and `OPEN_ROUTER_KEY` that is set. Use a separate key with a small
-credit limit: FreeRyder only calls free models, so it should never spend anything.
-
-## Use
+## Python
 
 ```bash
-freeryder list                 # currently free text models
-freeryder scan                 # benchmark a random sample, save the ranking
-freeryder ask "Hello there"    # one prompt to the current best model
-freeryder serve --port 8765    # local OpenAI-compatible proxy
+cd python && pip install -e .
+freeryder list                                   # currently free text models (no key needed)
+freeryder --api-key "$KEY" scan                  # benchmark a random sample, save the ranking
+freeryder --api-key "$KEY" ask "Hello there"     # one prompt to the current best model
+freeryder --api-key "$KEY" serve --port 8765     # local OpenAI-compatible proxy
 ```
 
-With the proxy running, point any OpenAI client at it and use any model name
+```python
+from freeryder import FreeRyder
+ryder = FreeRyder(api_key)
+print(ryder.complete("Summarise the plot of Hamlet in one line."))
+```
+
+## TypeScript
+
+```bash
+cd typescript && npm install && npm run build
+npx freeryder --api-key "$KEY" scan              # same commands as above
+```
+
+```ts
+import { FreeRyder } from "freeryder";
+const ryder = new FreeRyder({ apiKey });
+console.log(await ryder.complete("Summarise the plot of Hamlet in one line."));
+```
+
+## Proxy
+
+With `serve` running, point any OpenAI client at it and use any model name
 (e.g. `freeryder`); FreeRyder replaces it:
 
 ```python
@@ -40,14 +59,6 @@ client.chat.completions.create(model="freeryder", messages=[{"role": "user", "co
 ```
 
 `GET /status` shows the ranking and which models are cooling down.
-
-As a library:
-
-```python
-from freeryder import FreeRyder
-ryder = FreeRyder()
-print(ryder.complete("Summarise the plot of Hamlet in one line."))
-```
 
 ## How it picks
 
@@ -67,7 +78,7 @@ print(ryder.complete("Summarise the plot of Hamlet in one line."))
 5. **Rescan** when no ranked model is usable, or every 6 hours to pick up new models.
    The ranking is cached in `~/.cache/freeryder/state.json`.
 
-All thresholds are in `freeryder.Config`.
+All thresholds are in `Config` (Python) / `config` (TypeScript).
 
 ## Notes
 
@@ -82,5 +93,9 @@ All thresholds are in `freeryder.Config`.
 ## Tests
 
 ```bash
-python -m pytest
+cd python && python -m pytest
+cd typescript && npm test
 ```
+
+The live tests call OpenRouter and run only when `OPEN_ROUTER_KEY_JUST_FOR_FREE_MODELS`
+is set; the tests are the only place that environment variable is read.

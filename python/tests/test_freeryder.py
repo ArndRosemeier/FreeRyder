@@ -58,7 +58,7 @@ class FakeClient:
 def ryder(behaviour, **cfg):
     cfg.setdefault("fallback_model", None)
     client = FakeClient(behaviour)
-    return client, FreeRyder(client, Config(state_file=None, min_rescan_gap=0, **cfg))
+    return client, FreeRyder(config=Config(state_file=None, min_rescan_gap=0, **cfg), client=client)
 
 
 def test_good_answers_pass_every_task():
@@ -187,3 +187,9 @@ def test_fallback_router_when_nothing_works():
     client.behaviour["a"] = "busy"
     res = r.chat({"messages": [{"role": "user", "content": "hi"}]})
     assert res.ok and client.calls[-1] == "openrouter/free"
+
+
+def test_key_is_required():
+    import pytest
+    with pytest.raises(ValueError):
+        FreeRyder(config=Config(state_file=None))

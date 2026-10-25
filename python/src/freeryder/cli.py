@@ -17,6 +17,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--sample", type=int, default=10, help="models benchmarked per scan (default 10)")
     p.add_argument("--min-score", type=float, default=0.5)
+    p.add_argument("--api-key", help="OpenRouter API key (needed for everything but list)")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="list currently free text models")
     sub.add_parser("scan", help="benchmark a random sample and save the ranking")
@@ -29,9 +30,9 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
-    client = OpenRouterClient()
-    if not client.api_key and args.cmd != "list":
-        print("Set OPEN_ROUTER_KEY_JUST_FOR_FREE_MODELS (or OPENROUTER_API_KEY).", file=sys.stderr)
+    client = OpenRouterClient(args.api_key)
+    if not args.api_key and args.cmd != "list":
+        print("--api-key is required for this command.", file=sys.stderr)
         return 2
 
     if args.cmd == "list":
@@ -39,7 +40,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{m['id']:<55} ctx {m.get('context_length')}")
         return 0
 
-    ryder = FreeRyder(client, Config(sample_size=args.sample, min_score=args.min_score))
+    cfg = Config(sample_size=args.sample, min_score=args.min_score)
+    ryder = FreeRyder(config=cfg, client=client)
     if args.cmd == "scan":
         reports = ryder.scan()
         print("score  model" + " " * 52 + "details")

@@ -58,9 +58,14 @@ class NoModelAvailable(RuntimeError):
 
 
 class FreeRyder:
-    def __init__(self, client: OpenRouterClient | None = None, config: Config | None = None,
-                 benchmark: Benchmark | None = None):
-        self.client = client or OpenRouterClient()
+    def __init__(self, api_key: str | None = None, config: Config | None = None, *,
+                 client: OpenRouterClient | None = None, benchmark: Benchmark | None = None):
+        """Pass your OpenRouter `api_key` (or a ready `client`)."""
+        if client is None:
+            if not api_key:
+                raise ValueError("FreeRyder needs an OpenRouter api_key")
+            client = OpenRouterClient(api_key)
+        self.client = client
         self.cfg = config or Config()
         self.bench = benchmark or Benchmark(self.client, timeout=self.cfg.timeout)
         self.ranking: list[Candidate] = []

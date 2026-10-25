@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 import urllib.error
 import urllib.request
@@ -11,14 +10,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 BASE_URL = "https://openrouter.ai/api/v1"
-KEY_VARS = ("OPEN_ROUTER_KEY_JUST_FOR_FREE_MODELS", "OPENROUTER_API_KEY", "OPEN_ROUTER_KEY")
-
-
-def api_key_from_env() -> str | None:
-    for var in KEY_VARS:
-        if os.environ.get(var):
-            return os.environ[var]
-    return None
 
 
 @dataclass
@@ -52,9 +43,10 @@ class CallResult:
 
 
 class OpenRouterClient:
-    def __init__(self, api_key: str | None = None, base_url: str = BASE_URL,
+    def __init__(self, api_key: str | None, base_url: str = BASE_URL,
                  app_name: str = "freeryder"):
-        self.api_key = api_key or api_key_from_env()
+        """`api_key` is your OpenRouter key. Only `list_models` works without one."""
+        self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.app_name = app_name
 
